@@ -59,6 +59,34 @@ func TestParseRawWriteMessageResponse(t *testing.T) {
 	}
 }
 
+func TestParseRawReadMessageValueTrimsUntaggedPadding(t *testing.T) {
+	pdu := []byte{0x07, 0x91, 0x44, 0x87, 0x20}
+	val := append([]byte{0x06, byte(len(pdu)), 0x00}, pdu...)
+	val = append(val, 0x00, 0x00, 0x00, 0x00)
+
+	got, err := parseRawReadMessageValue(val)
+	if err != nil {
+		t.Fatalf("parseRawReadMessageValue() error = %v", err)
+	}
+	if string(got.data) != string(pdu) || got.hasTag {
+		t.Fatalf("got data=%x hasTag=%v, want data=%x hasTag=false", got.data, got.hasTag, pdu)
+	}
+}
+
+func TestParseRawReadMessageValueTrimsTaggedPadding(t *testing.T) {
+	pdu := []byte{0x07, 0x91, 0x44, 0x87, 0x20}
+	val := append([]byte{byte(TagTypeMTNotRead), 0x06, byte(len(pdu)), 0x00}, pdu...)
+	val = append(val, 0x00, 0x00, 0x00, 0x00)
+
+	got, err := parseRawReadMessageValue(val)
+	if err != nil {
+		t.Fatalf("parseRawReadMessageValue() error = %v", err)
+	}
+	if string(got.data) != string(pdu) || !got.hasTag || got.tag != TagTypeMTNotRead {
+		t.Fatalf("got data=%x hasTag=%v tag=%v, want data=%x hasTag=true tag=%v", got.data, got.hasTag, got.tag, pdu, TagTypeMTNotRead)
+	}
+}
+
 func TestParseGetMessageProtocolResponse(t *testing.T) {
 	cases := []struct {
 		name     string

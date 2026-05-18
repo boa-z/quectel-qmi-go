@@ -16,6 +16,12 @@ type WMSService struct {
 	clientID uint8
 }
 
+type rawReadMessageValue struct {
+	tag    MessageTagType
+	hasTag bool
+	data   []byte
+}
+
 // NewWMSService creates a WMS service wrapper / NewWMSService 创建 WMS 服务封装
 func NewWMSService(client *Client) (*WMSService, error) {
 	clientID, err := client.AllocateClientID(ServiceWMS)
@@ -314,47 +320,50 @@ func (w *WMSService) RawReadMessage(ctx context.Context, storageType uint8, inde
 		return nil, fmt.Errorf("response missing raw message TLV or too short")
 	}
 
-	val := msgTLV.Value
-	var length uint16
-	var dataOffset int
+	parsed, err := parseRawReadMessageValue(msgTLV.Value)
+	if err != nil {
+		return nil, err
+	}
+	return parsed.data, nil
+}
 
-	// Simple heuristic: check if length at [1:3] makes sense for the buffer size
-	len1 := binary.LittleEndian.Uint16(val[1:3])
-	if int(3+len1) == len(val) {
-		// Format: [Format(1)][Length(2)][Data(N)]
-		length = len1
-		dataOffset = 3
-	} else if len(val) >= 4 {
-		len2 := binary.LittleEndian.Uint16(val[2:4])
-		if int(4+len2) == len(val) {
-			// Format: [Tag(1)][Format(1)][Length(2)][Data(N)]
-			length = len2
-			dataOffset = 4
+func parseRawReadMessageValue(val []byte) (rawReadMessageValue, error) {
+	if len(val) < 3 {
+		return rawReadMessageValue{}, fmt.Errorf("raw message TLV too short")
+	}
+
+	// Untagged format: [Format(1)], [Length(2)], [Data(N)].
+	length := int(binary.LittleEndian.Uint16(val[1:3]))
+	if length <= len(val)-3 {
+		return rawReadMessageValue{
+			data: append([]byte(nil), val[3:3+length]...),
+		}, nil
+	}
+
+	// Tagged format: [Tag(1)], [Format(1)], [Length(2)], [Data(N)].
+	if len(val) >= 4 {
+		length = int(binary.LittleEndian.Uint16(val[2:4]))
+		if isKnownMessageTagType(val[0]) && length <= len(val)-4 {
+			return rawReadMessageValue{
+				tag:    MessageTagType(val[0]),
+				hasTag: true,
+				data:   append([]byte(nil), val[4:4+length]...),
+			}, nil
 		}
 	}
 
-	if dataOffset == 0 {
-		// 如果无法根据长度启发式判断，尝试直接使用前 3 个字节之后的全部内容作为 fallback
-		// 某些固件可能返回的长度字段不符合标准格式，或者包含了额外的填充
-		if len(val) > 3 {
-			// 假设格式为 [Format(1)][Length(2)][Data(N)]
-			// 并信任返回的 Length 字段，即使它与 buffer 总长度不完全匹配
-			len1 := binary.LittleEndian.Uint16(val[1:3])
-			if int(3+len1) <= len(val) {
-				length = len1
-				dataOffset = 3
-			} else {
-				// 长度字段指示的数据比实际 buffer 还大，这是异常情况
-				// 但作为最后的尝试，返回剩余的所有数据
-				dataOffset = 3
-				length = uint16(len(val) - 3)
-			}
-		} else {
-			return nil, fmt.Errorf("could not parse raw message TLV: buffer too small (len: %d)", len(val))
-		}
-	}
+	return rawReadMessageValue{
+		data: append([]byte(nil), val[3:]...),
+	}, nil
+}
 
-	return val[dataOffset : dataOffset+int(length)], nil
+func isKnownMessageTagType(v byte) bool {
+	switch MessageTagType(v) {
+	case TagTypeMTRead, TagTypeMTNotRead, TagTypeMOSent, TagTypeMONotSent:
+		return true
+	default:
+		return false
+	}
 }
 
 func (w *WMSService) RawReadMessageMeta(ctx context.Context, storageType uint8, index uint32) (MessageTagType, bool, []byte, error) {
@@ -381,21 +390,11 @@ func (w *WMSService) RawReadMessageMeta(ctx context.Context, storageType uint8, 
 		return 0, false, nil, fmt.Errorf("response missing raw message TLV or too short")
 	}
 
-	val := msgTLV.Value
-	if len(val) >= 4 {
-		len2 := binary.LittleEndian.Uint16(val[2:4])
-		if int(4+len2) <= len(val) {
-			tag := MessageTagType(val[0])
-			return tag, true, val[4 : 4+len2], nil
-		}
+	parsed, err := parseRawReadMessageValue(msgTLV.Value)
+	if err != nil {
+		return 0, false, nil, err
 	}
-
-	len1 := binary.LittleEndian.Uint16(val[1:3])
-	if int(3+len1) <= len(val) {
-		return 0, false, val[3 : 3+len1], nil
-	}
-
-	return 0, false, val[3:], nil
+	return parsed.tag, parsed.hasTag, parsed.data, nil
 }
 
 func (w *WMSService) DeleteMessage(ctx context.Context, storageType uint8, index uint32) error {
