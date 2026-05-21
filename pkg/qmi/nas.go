@@ -1431,23 +1431,47 @@ func parseNetworkTimeResponse(resp *Packet) (*NetworkTimeInfo, error) {
 }
 
 func ParseNetworkTimeIndication(packet *Packet) (*NetworkTimeInfo, error) {
-	// Some modems emit the same TLVs as GetNetworkTime response (0x10/0x11),
-	// others only include one compact network-time TLV.
-	if FindTLV(packet.TLVs, 0x10) != nil || FindTLV(packet.TLVs, 0x11) != nil {
+	if packet == nil {
+		return nil, fmt.Errorf("network time indication packet is nil")
+	}
+
+	// NAS_NETWORK_TIME_IND uses split TLVs:
+	// 0x01 universal time, 0x10 timezone, 0x11 DST, 0x12 radio interface.
+	if tlv := FindTLV(packet.TLVs, 0x01); tlv != nil {
+		value, err := parseNetworkTimeIndicationTLV(tlv)
+		if err != nil {
+			return nil, err
+		}
+		if tz := FindTLV(packet.TLVs, 0x10); tz != nil {
+			if len(tz.Value) < 1 {
+				return nil, fmt.Errorf("network time timezone TLV too short: %d", len(tz.Value))
+			}
+			value.TimezoneOffsetQuarters = int8(tz.Value[0])
+		}
+		if dst := FindTLV(packet.TLVs, 0x11); dst != nil {
+			if len(dst.Value) < 1 {
+				return nil, fmt.Errorf("network time daylight savings TLV too short: %d", len(dst.Value))
+			}
+			value.DaylightSavingsAdjustment = dst.Value[0]
+		}
+		if rat := FindTLV(packet.TLVs, 0x12); rat != nil {
+			if len(rat.Value) < 1 {
+				return nil, fmt.Errorf("network time radio interface TLV too short: %d", len(rat.Value))
+			}
+			value.RadioInterface = rat.Value[0]
+		}
+		return &NetworkTimeInfo{
+			ThreeGPP:    value,
+			HasThreeGPP: true,
+		}, nil
+	}
+
+	// Keep compatibility with modems that emit GetNetworkTime response-style
+	// TLVs on the indication path.
+	if networkTimeResponseTLVPresent(packet) {
 		return parseNetworkTimePacket(packet, false)
 	}
-	tlv := FindTLV(packet.TLVs, 0x01)
-	if tlv == nil {
-		return nil, fmt.Errorf("network time indication TLV not found")
-	}
-	value, err := parseNetworkTimeTLV(tlv)
-	if err != nil {
-		return nil, err
-	}
-	return &NetworkTimeInfo{
-		ThreeGPP:    value,
-		HasThreeGPP: true,
-	}, nil
+	return nil, fmt.Errorf("network time indication TLV not found")
 }
 
 func ParseNetworkRejectIndication(packet *Packet) (*NASNetworkRejectInfo, error) {
@@ -1497,6 +1521,39 @@ func parseNetworkTimeTLV(tlv *TLV) (NetworkTime, error) {
 		DaylightSavingsAdjustment: tlv.Value[9],
 		RadioInterface:            tlv.Value[10],
 	}, nil
+}
+
+func parseNetworkTimeIndicationTLV(tlv *TLV) (NetworkTime, error) {
+	if tlv == nil {
+		return NetworkTime{}, fmt.Errorf("network time indication TLV is nil")
+	}
+	if len(tlv.Value) < 8 {
+		return NetworkTime{}, fmt.Errorf("network time universal time TLV too short: %d", len(tlv.Value))
+	}
+	value := NetworkTime{
+		Year:      binary.LittleEndian.Uint16(tlv.Value[0:2]),
+		Month:     tlv.Value[2],
+		Day:       tlv.Value[3],
+		Hour:      tlv.Value[4],
+		Minute:    tlv.Value[5],
+		Second:    tlv.Value[6],
+		DayOfWeek: tlv.Value[7],
+	}
+	if len(tlv.Value) >= 11 {
+		value.TimezoneOffsetQuarters = int8(tlv.Value[8])
+		value.DaylightSavingsAdjustment = tlv.Value[9]
+		value.RadioInterface = tlv.Value[10]
+	}
+	return value, nil
+}
+
+func networkTimeResponseTLVPresent(packet *Packet) bool {
+	for _, tlvType := range []uint8{0x10, 0x11} {
+		if tlv := FindTLV(packet.TLVs, tlvType); tlv != nil && len(tlv.Value) >= 11 {
+			return true
+		}
+	}
+	return false
 }
 
 func parseUint64Sequence(value []byte, count int) ([]uint64, error) {

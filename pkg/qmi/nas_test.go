@@ -365,6 +365,32 @@ func TestParseNetworkTimeResponse(t *testing.T) {
 	}
 }
 
+func TestParseNetworkTimeIndicationSplitTLVs(t *testing.T) {
+	packet := &Packet{
+		TLVs: []TLV{
+			{Type: 0x01, Value: []byte{0xEA, 0x07, 0x05, 0x15, 0x14, 0x0D, 0x22, 0x04}},
+			{Type: 0x10, Value: []byte{0x20}},
+			{Type: 0x11, Value: []byte{0x01}},
+			{Type: 0x12, Value: []byte{0x08}},
+		},
+	}
+
+	info, err := ParseNetworkTimeIndication(packet)
+	if err != nil {
+		t.Fatalf("ParseNetworkTimeIndication returned error: %v", err)
+	}
+	if !info.HasThreeGPP {
+		t.Fatal("expected 3GPP network time")
+	}
+	got := info.ThreeGPP
+	if got.Year != 2026 || got.Month != 5 || got.Day != 21 || got.Hour != 20 || got.Minute != 13 || got.Second != 34 || got.DayOfWeek != 4 {
+		t.Fatalf("unexpected universal time: %+v", got)
+	}
+	if got.TimezoneOffsetQuarters != 32 || got.DaylightSavingsAdjustment != 1 || got.RadioInterface != 0x08 {
+		t.Fatalf("unexpected optional time fields: %+v", got)
+	}
+}
+
 func TestBuildNASRegisterIndicationsTLVs(t *testing.T) {
 	tlvs := buildNASRegisterIndicationsTLVs(NASIndicationRegistration{
 		ServingSystemChanged:   true,

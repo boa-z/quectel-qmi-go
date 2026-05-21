@@ -101,6 +101,28 @@ func TestHandleIndicationNASNetworkTimeChanged(t *testing.T) {
 	}
 }
 
+func TestHandleIndicationNASNetworkTimeSplitTLVs(t *testing.T) {
+	m := &Manager{
+		log:     NewNopLogger(),
+		events:  NewEventEmitter(),
+		eventCh: make(chan internalEvent, 1),
+	}
+	m.handleIndication(qmi.Event{
+		Type: qmi.EventNASNetworkTimeChanged,
+		Packet: &qmi.Packet{TLVs: []qmi.TLV{
+			{Type: 0x01, Value: []byte{0xEA, 0x07, 0x05, 0x15, 0x14, 0x0D, 0x22, 0x04}},
+			{Type: 0x10, Value: []byte{0x20}},
+			{Type: 0x11, Value: []byte{0x01}},
+			{Type: 0x12, Value: []byte{0x08}},
+		}},
+	})
+
+	info, ts, valid := m.snapshot.NASNetworkTime()
+	if !valid || info == nil || !info.HasThreeGPP || info.ThreeGPP.Year != 2026 || info.ThreeGPP.TimezoneOffsetQuarters != 32 || ts.IsZero() {
+		t.Fatalf("unexpected nas network time snapshot: valid=%v ts=%v info=%+v", valid, ts, info)
+	}
+}
+
 func TestHandleIndicationNASSignalInfoChanged(t *testing.T) {
 	m := &Manager{
 		log:     NewNopLogger(),
