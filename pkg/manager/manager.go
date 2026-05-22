@@ -3571,12 +3571,19 @@ func (m *Manager) handleIndication(evt qmi.Event) {
 				MessageID:   evt.MessageID,
 			})
 		} else if tlv := qmi.FindTLV(evt.Packet.TLVs, 0x11); tlv != nil && len(tlv.Value) >= 6 {
-			// 0x11 = Transfer Route MT Message: AckIndicator(1) + TransactionID(4) + Format(1) + RawData(...)
-			// 0x11 = 传输路由 MT 消息: Ack(1) + 事务ID(4) + 格式(1) + 原始数据(...)
-			ackRequired := tlv.Value[0] != 0
+			// 0x11 = Transfer Route MT Message:
+			// AckIndicator(1) + TransactionID(4) + Format(1) + RawDataLen(2) + RawData(...)
+			// AckIndicator: 0 = send ACK, 1 = do not send ACK.
+			ackRequired := tlv.Value[0] == 0
 			transactionID := binary.LittleEndian.Uint32(tlv.Value[1:5])
 			format := tlv.Value[5]
 			pdu := tlv.Value[6:]
+			if len(tlv.Value) >= 8 {
+				rawLen := int(binary.LittleEndian.Uint16(tlv.Value[6:8]))
+				if rawLen <= len(tlv.Value)-8 {
+					pdu = tlv.Value[8 : 8+rawLen]
+				}
+			}
 			// Copy PDU to prevent underlying buffer corruption / 拷贝 PDU 防止底层缓冲区损坏
 			pduCopy := make([]byte, len(pdu))
 			copy(pduCopy, pdu)
