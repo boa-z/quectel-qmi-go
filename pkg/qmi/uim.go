@@ -101,7 +101,10 @@ const (
 	UIMAppTypeISIM    uint8 = 5
 )
 
-var uimUSIMAIDPrefix = []byte{0xA0, 0x00, 0x00, 0x00, 0x87, 0x10, 0x02}
+var (
+	uimUSIMAIDPrefix = []byte{0xA0, 0x00, 0x00, 0x00, 0x87, 0x10, 0x02}
+	uimISIMAIDPrefix = []byte{0xA0, 0x00, 0x00, 0x00, 0x87, 0x10, 0x04}
+)
 
 // CardStatus represents the SIM card status / CardStatus代表SIM卡状态
 
@@ -136,6 +139,17 @@ type CardStatusDetails struct {
 	UPINState           PINStatus
 	UPINRetries         uint8
 	UPUKRetries         uint8
+}
+
+type uimCardStatusApp struct {
+	appType             uint8
+	appState            uint8
+	persoState          uint8
+	persoFeature        uint8
+	persoRetries        uint8
+	persoUnblockRetries uint8
+	aid                 []byte
+	pin                 QMIUIM_PIN_STATE
 }
 
 type QMIUIM_PIN_STATE struct {
@@ -319,59 +333,9 @@ func (u *UIMService) GetCardStatusDetails(ctx context.Context) (*CardStatusDetai
 	details.ErrorCode = v[13]
 	details.NumApp = v[14]
 
-	type app struct {
-		appType             uint8
-		appState            uint8
-		persoState          uint8
-		persoFeature        uint8
-		persoRetries        uint8
-		persoUnblockRetries uint8
-		aid                 []byte
-		aidLen              uint8
-		pin                 QMIUIM_PIN_STATE
-	}
+	apps := parseUIMCardStatusApps(v, details.NumApp)
 
-	offset := 15
-	apps := make([]app, 0, int(details.NumApp))
-	for i := 0; i < int(details.NumApp); i++ {
-		if offset+7 > len(v) {
-			break
-		}
-		a := app{
-			appType:             v[offset],
-			appState:            v[offset+1],
-			persoState:          v[offset+2],
-			persoFeature:        v[offset+3],
-			persoRetries:        v[offset+4],
-			persoUnblockRetries: v[offset+5],
-			aidLen:              v[offset+6],
-		}
-		offset += 7
-		if offset+int(a.aidLen) > len(v) {
-			break
-		}
-		if a.aidLen > 0 {
-			a.aid = make([]byte, int(a.aidLen))
-			copy(a.aid, v[offset:offset+int(a.aidLen)])
-		}
-		offset += int(a.aidLen)
-		if offset+7 > len(v) {
-			break
-		}
-		a.pin = QMIUIM_PIN_STATE{
-			UnivPIN:     v[offset],
-			PIN1State:   v[offset+1],
-			PIN1Retries: v[offset+2],
-			PUK1Retries: v[offset+3],
-			PIN2State:   v[offset+4],
-			PIN2Retries: v[offset+5],
-			PUK2Retries: v[offset+6],
-		}
-		offset += 7
-		apps = append(apps, a)
-	}
-
-	var chosen *app
+	var chosen *uimCardStatusApp
 	for i := range apps {
 		if apps[i].appType == 0x02 {
 			chosen = &apps[i]
@@ -437,6 +401,49 @@ func (u *UIMService) GetCardStatusDetails(ctx context.Context) (*CardStatusDetai
 	return details, status, nil
 }
 
+func parseUIMCardStatusApps(v []byte, numApp uint8) []uimCardStatusApp {
+	offset := 15
+	apps := make([]uimCardStatusApp, 0, int(numApp))
+	for i := 0; i < int(numApp); i++ {
+		if offset+7 > len(v) {
+			break
+		}
+		app := uimCardStatusApp{
+			appType:             v[offset],
+			appState:            v[offset+1],
+			persoState:          v[offset+2],
+			persoFeature:        v[offset+3],
+			persoRetries:        v[offset+4],
+			persoUnblockRetries: v[offset+5],
+		}
+		aidLen := int(v[offset+6])
+		offset += 7
+		if offset+aidLen > len(v) {
+			break
+		}
+		if aidLen > 0 {
+			app.aid = make([]byte, aidLen)
+			copy(app.aid, v[offset:offset+aidLen])
+		}
+		offset += aidLen
+		if offset+7 > len(v) {
+			break
+		}
+		app.pin = QMIUIM_PIN_STATE{
+			UnivPIN:     v[offset],
+			PIN1State:   v[offset+1],
+			PIN1Retries: v[offset+2],
+			PUK1Retries: v[offset+3],
+			PIN2State:   v[offset+4],
+			PIN2Retries: v[offset+5],
+			PUK2Retries: v[offset+6],
+		}
+		offset += 7
+		apps = append(apps, app)
+	}
+	return apps
+}
+
 // GetCardStatus queries the UIM card status / GetCardStatus查询UIM卡状态
 func (u *UIMService) GetCardStatus(ctx context.Context) (SIMStatus, error) {
 	_, st, err := u.GetCardStatusDetails(ctx)
@@ -444,20 +451,36 @@ func (u *UIMService) GetCardStatus(ctx context.Context) (SIMStatus, error) {
 }
 
 func (u *UIMService) GetUSIMAID(ctx context.Context) ([]byte, error) {
-	details, _, err := u.GetCardStatusDetails(ctx)
+	return u.getCardStatusAID(ctx, UIMAppTypeUSIM, uimUSIMAIDPrefix, "USIM")
+}
+
+func (u *UIMService) GetISIMAID(ctx context.Context) ([]byte, error) {
+	return u.getCardStatusAID(ctx, UIMAppTypeISIM, uimISIMAIDPrefix, "ISIM")
+}
+
+func (u *UIMService) getCardStatusAID(ctx context.Context, appType uint8, prefix []byte, label string) ([]byte, error) {
+	resp, err := u.client.SendRequest(ctx, ServiceUIM, u.clientID, UIMGetCardStatus, nil)
 	if err != nil {
 		return nil, err
 	}
-	if details == nil {
-		return nil, fmt.Errorf("UIM card status details missing")
+	if err := resp.CheckResult(); err != nil {
+		return nil, fmt.Errorf("UIM get card status failed: %w", err)
 	}
-	if details.AppType != UIMAppTypeUSIM {
-		return nil, fmt.Errorf("UIM USIM application not found: app_type=0x%02x", details.AppType)
+	tlv := FindTLV(resp.TLVs, 0x10)
+	if tlv == nil || len(tlv.Value) < 15 {
+		return nil, fmt.Errorf("card status TLV missing or too short")
 	}
-	if len(details.AID) < len(uimUSIMAIDPrefix) || !bytes.Equal(details.AID[:len(uimUSIMAIDPrefix)], uimUSIMAIDPrefix) {
-		return nil, fmt.Errorf("UIM USIM AID invalid: %X", details.AID)
+	apps := parseUIMCardStatusApps(tlv.Value, tlv.Value[14])
+	for _, app := range apps {
+		if app.appType != appType {
+			continue
+		}
+		if len(app.aid) < len(prefix) || !bytes.Equal(app.aid[:len(prefix)], prefix) {
+			return nil, fmt.Errorf("UIM %s AID invalid: %X", label, app.aid)
+		}
+		return append([]byte(nil), app.aid...), nil
 	}
-	return append([]byte(nil), details.AID...), nil
+	return nil, fmt.Errorf("UIM %s application not found: app_type=0x%02x", label, appType)
 }
 
 // VerifyPIN verifies the PIN code / VerifyPIN 验证 PIN 码

@@ -1950,6 +1950,12 @@ func (m *Manager) GetUSIMAID(ctx context.Context) ([]byte, error) {
 	})
 }
 
+func (m *Manager) GetISIMAID(ctx context.Context) ([]byte, error) {
+	return withUIMRecoveryValue(m, "GetISIMAID", func(uim *qmi.UIMService) ([]byte, error) {
+		return uim.GetISIMAID(ctx)
+	})
+}
+
 func (m *Manager) GetNativeMCCMNC(ctx context.Context) (mcc, mnc string, err error) {
 	type nativeLocation struct {
 		mcc string

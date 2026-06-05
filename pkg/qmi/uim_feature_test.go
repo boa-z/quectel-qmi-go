@@ -84,30 +84,49 @@ func requestRecordNumber(req *Packet) uint16 {
 }
 
 func cardStatusPacketWithUSIMAID(aid []byte) *Packet {
-	value := make([]byte, 15, 15+7+len(aid)+7)
+	return cardStatusPacketWithApps(cardStatusTestApp{appType: UIMAppTypeUSIM, aid: aid})
+}
+
+func cardStatusPacketWithISIMAID(aid []byte) *Packet {
+	return cardStatusPacketWithApps(cardStatusTestApp{appType: UIMAppTypeISIM, aid: aid})
+}
+
+type cardStatusTestApp struct {
+	appType uint8
+	aid     []byte
+}
+
+func cardStatusPacketWithApps(apps ...cardStatusTestApp) *Packet {
+	capHint := 15
+	for _, app := range apps {
+		capHint += 14 + len(app.aid)
+	}
+	value := make([]byte, 15, capHint)
 	value[8] = 1                        // number of slots
 	value[9] = 0x01                     // card present
 	value[10] = byte(PINStatusDisabled) // UPIN state
-	value[14] = 1                       // number of applications
-	value = append(value,
-		UIMAppTypeUSIM, // app type
-		0x01,           // app state
-		0x00,           // personalization state
-		0x00,           // personalization feature
-		0x00,           // personalization retries
-		0x00,           // personalization unblock retries
-		byte(len(aid)),
-	)
-	value = append(value, aid...)
-	value = append(value,
-		0x00,                    // UPIN not used
-		byte(PINStatusDisabled), // PIN1 state
-		0x03,                    // PIN1 retries
-		0x0A,                    // PUK1 retries
-		byte(PINStatusDisabled), // PIN2 state
-		0x03,                    // PIN2 retries
-		0x0A,                    // PUK2 retries
-	)
+	value[14] = byte(len(apps))         // number of applications
+	for _, app := range apps {
+		value = append(value,
+			app.appType, // app type
+			0x01,        // app state
+			0x00,        // personalization state
+			0x00,        // personalization feature
+			0x00,        // personalization retries
+			0x00,        // personalization unblock retries
+			byte(len(app.aid)),
+		)
+		value = append(value, app.aid...)
+		value = append(value,
+			0x00,                    // UPIN not used
+			byte(PINStatusDisabled), // PIN1 state
+			0x03,                    // PIN1 retries
+			0x0A,                    // PUK1 retries
+			byte(PINStatusDisabled), // PIN2 state
+			0x03,                    // PIN2 retries
+			0x0A,                    // PUK2 retries
+		)
+	}
 	return &Packet{TLVs: []TLV{
 		successResultTLV(),
 		{Type: 0x10, Value: value},
@@ -144,6 +163,31 @@ func TestUIMServiceGetUSIMAIDUsesFullCardStatusAID(t *testing.T) {
 	}
 	if !sameBytes(got, aid) {
 		t.Fatalf("GetUSIMAID() = %X, want %X", got, aid)
+	}
+}
+
+func TestUIMServiceGetISIMAIDUsesFullCardStatusAID(t *testing.T) {
+	client := newUIMUnitTestClient()
+	usimAID := []byte{0xA0, 0x00, 0x00, 0x00, 0x87, 0x10, 0x02, 0xFF, 0x49, 0xFF, 0x01, 0x89}
+	aid := []byte{0xA0, 0x00, 0x00, 0x00, 0x87, 0x10, 0x04, 0xFF, 0xFF, 0xFF, 0xFF, 0x89, 0x03, 0x02, 0x00, 0x00}
+	stop := serveUIMUnitTestRequests(t, client, func(req *Packet) *Packet {
+		if req.MessageID != UIMGetCardStatus {
+			t.Fatalf("unexpected message id 0x%04x", req.MessageID)
+		}
+		return cardStatusPacketWithApps(
+			cardStatusTestApp{appType: UIMAppTypeUSIM, aid: usimAID},
+			cardStatusTestApp{appType: UIMAppTypeISIM, aid: aid},
+		)
+	})
+	defer stop()
+	uim := &UIMService{client: client, clientID: 1}
+
+	got, err := uim.GetISIMAID(context.Background())
+	if err != nil {
+		t.Fatalf("GetISIMAID() error = %v", err)
+	}
+	if !sameBytes(got, aid) {
+		t.Fatalf("GetISIMAID() = %X, want %X", got, aid)
 	}
 }
 
