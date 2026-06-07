@@ -19,6 +19,7 @@ import (
 	"github.com/iniwex5/quectel-qmi-go/pkg/qmi"
 	"github.com/warthog618/sms"
 	"github.com/warthog618/sms/encoding/tpdu"
+	"github.com/warthog618/sms/encoding/ucs2"
 )
 
 // ============================================================================
@@ -4083,22 +4084,111 @@ func DecodeIncomingSMSPDU(raw []byte, storageType uint8, index uint32) (*Decoded
 		return nil, fmt.Errorf("PDU too short")
 	}
 
-	candidates := make([][]byte, 0, 2)
-	smscLen := int(raw[0])
-	if 1+smscLen <= len(raw) {
-		candidates = append(candidates, raw[1+smscLen:])
+	candidates := incomingSMSPDUCandidates(raw)
+	if len(candidates) == 0 {
+		return nil, fmt.Errorf("PDU decode failed: no supported SMS PDU candidate")
 	}
-	candidates = append(candidates, raw)
 
-	var lastErr error
-	for _, tpduBytes := range candidates {
-		resp, err := decodeIncomingTPDU(tpduBytes, storageType, index)
+	errs := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		resp, err := decodeIncomingTPDU(candidate.tpdu, storageType, index)
 		if err == nil {
 			return resp, nil
 		}
-		lastErr = err
+		errs = append(errs, fmt.Sprintf("%s: %v", candidate.name, err))
 	}
-	return nil, fmt.Errorf("PDU decode failed: %w", lastErr)
+	return nil, fmt.Errorf("PDU decode failed: %s", strings.Join(errs, "; "))
+}
+
+type incomingSMSPDUCandidate struct {
+	name string
+	tpdu []byte
+}
+
+func incomingSMSPDUCandidates(raw []byte) []incomingSMSPDUCandidate {
+	candidates := make([]incomingSMSPDUCandidate, 0, 3)
+	appendCandidate := func(name string, tpduBytes []byte) {
+		if !looksLikeDeliverTPDU(tpduBytes) {
+			return
+		}
+		for _, candidate := range candidates {
+			if string(candidate.tpdu) == string(tpduBytes) {
+				return
+			}
+		}
+		candidates = append(candidates, incomingSMSPDUCandidate{name: name, tpdu: append([]byte(nil), tpduBytes...)})
+	}
+
+	appendCandidate("direct_tpdu", raw)
+
+	if tpduBytes, ok := extractFullPDUWithSMSC(raw); ok {
+		appendCandidate("full_pdu_smsc", tpduBytes)
+	}
+
+	if tpduBytes, ok := extractIncomingRPDataTPDU(raw); ok {
+		appendCandidate("rp_data", tpduBytes)
+	}
+
+	return candidates
+}
+
+func looksLikeDeliverTPDU(tpduBytes []byte) bool {
+	return len(tpduBytes) > 0 && tpduBytes[0]&0x03 == 0
+}
+
+func extractFullPDUWithSMSC(raw []byte) ([]byte, bool) {
+	if len(raw) < 2 {
+		return nil, false
+	}
+	smscLen := int(raw[0])
+	if smscLen == 0 {
+		if len(raw) <= 1 {
+			return nil, false
+		}
+		return raw[1:], true
+	}
+	if smscLen < 2 || 1+smscLen >= len(raw) {
+		return nil, false
+	}
+	if raw[1]&0x80 == 0 {
+		return nil, false
+	}
+	return raw[1+smscLen:], true
+}
+
+func extractIncomingRPDataTPDU(raw []byte) ([]byte, bool) {
+	if len(raw) < 5 || raw[0] != 0x01 {
+		return nil, false
+	}
+	i := 2 // RP-MTI + RP-MR
+	if !skipRPAddress(raw, &i) {
+		return nil, false
+	}
+	if !skipRPAddress(raw, &i) {
+		return nil, false
+	}
+	if i >= len(raw) {
+		return nil, false
+	}
+	udLen := int(raw[i])
+	i++
+	if udLen <= 0 || i+udLen > len(raw) {
+		return nil, false
+	}
+	return raw[i : i+udLen], true
+}
+
+func skipRPAddress(raw []byte, i *int) bool {
+	if i == nil || *i >= len(raw) {
+		return false
+	}
+	n := int(raw[*i])
+	*i = *i + 1
+	if *i+n > len(raw) {
+		return false
+	}
+	*i += n
+	return true
 }
 
 func decodeIncomingTPDU(tpduBytes []byte, storageType uint8, index uint32) (*DecodedSMS, error) {
@@ -4170,7 +4260,12 @@ func (m *Manager) SendRawSMS(format uint8, pdu []byte) error {
 
 // SendSMS sends a text message / SendSMS 发送文本短信
 func (m *Manager) SendSMS(number, text string) error {
-	pdu, err := m.encodeSMS(number, text)
+	return m.SendSMSWithOptions(number, text, SendSMSOptions{})
+}
+
+// SendSMSWithOptions sends a text message with explicit submit encoding options.
+func (m *Manager) SendSMSWithOptions(number, text string, opts SendSMSOptions) error {
+	pdu, err := m.encodeSMSWithOptions(number, text, opts)
 	if err != nil {
 		return err
 	}
@@ -4182,12 +4277,48 @@ func (m *Manager) SendSMS(number, text string) error {
 	})
 }
 
+type SMSEncoding string
+
+const (
+	SMSEncodingAuto SMSEncoding = "auto"
+	SMSEncodingUCS2 SMSEncoding = "ucs2"
+)
+
+type SendSMSOptions struct {
+	Encoding SMSEncoding
+}
+
+func NormalizeSMSEncoding(raw string) (SMSEncoding, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", string(SMSEncodingAuto):
+		return SMSEncodingAuto, nil
+	case string(SMSEncodingUCS2):
+		return SMSEncodingUCS2, nil
+	default:
+		return "", fmt.Errorf("unsupported SMS encoding: %s", raw)
+	}
+}
+
 // encodeSMS encodes a text message into a 7-bit PDU format using warthog618/sms / encodeSMS 使用 warthog618/sms 将文本消息编码为 7-bit PDU 格式
 func (m *Manager) encodeSMS(number, text string) ([]byte, error) {
-	normalizedNumber := strings.TrimSpace(number)
-	options := []sms.EncoderOption{sms.AsSubmit, sms.To(normalizedNumber)}
+	return m.encodeSMSWithOptions(number, text, SendSMSOptions{})
+}
 
-	pdus, err := sms.Encode([]byte(text), options...)
+func (m *Manager) encodeSMSWithOptions(number, text string, opts SendSMSOptions) ([]byte, error) {
+	normalizedNumber := strings.TrimSpace(number)
+	encoding, err := NormalizeSMSEncoding(string(opts.Encoding))
+	if err != nil {
+		return nil, err
+	}
+
+	msg := []byte(text)
+	options := []sms.EncoderOption{sms.AsSubmit, sms.To(normalizedNumber)}
+	if encoding == SMSEncodingUCS2 {
+		msg = ucs2.Encode([]rune(text))
+		options = append(options, sms.AsUCS2)
+	}
+
+	pdus, err := sms.Encode(msg, options...)
 	if err != nil {
 		return nil, err
 	}
