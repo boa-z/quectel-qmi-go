@@ -82,7 +82,15 @@ func resolveActiveUIMSlot(info *qmi.UIMSlotStatus) (uint8, bool, string) {
 }
 
 func buildUIMReadiness(status qmi.SIMStatus, details *qmi.CardStatusDetails, slotInfo *qmi.UIMSlotStatus, ids DeviceIdentities, sourceErr error) UIMReadiness {
+	return buildUIMReadinessWithSlotError(status, details, slotInfo, ids, sourceErr, nil)
+}
+
+func buildUIMReadinessWithSlotError(status qmi.SIMStatus, details *qmi.CardStatusDetails, slotInfo *qmi.UIMSlotStatus, ids DeviceIdentities, cardErr error, slotErr error) UIMReadiness {
 	slot, slotKnown, slotSource := resolveActiveUIMSlot(slotInfo)
+	sourceErr := cardErr
+	if sourceErr == nil {
+		sourceErr = slotErr
+	}
 	out := UIMReadiness{
 		TransportReady: true,
 		ControlReady:   true,
@@ -95,8 +103,8 @@ func buildUIMReadiness(status qmi.SIMStatus, details *qmi.CardStatusDetails, slo
 		Err:            sourceErr,
 	}
 
-	if sourceErr != nil {
-		if isUIMReadinessTransportFatal(sourceErr) {
+	if cardErr != nil {
+		if isUIMReadinessTransportFatal(cardErr) {
 			out.TransportReady = false
 			out.ControlReady = false
 			out.Reason = UIMReadinessTransportFatal
@@ -104,6 +112,12 @@ func buildUIMReadiness(status qmi.SIMStatus, details *qmi.CardStatusDetails, slo
 		}
 		out.ControlReady = false
 		out.Reason = UIMReadinessControlUnavailable
+		return out
+	}
+	if isUIMReadinessTransportFatal(slotErr) {
+		out.TransportReady = false
+		out.ControlReady = false
+		out.Reason = UIMReadinessTransportFatal
 		return out
 	}
 
@@ -120,7 +134,7 @@ func buildUIMReadiness(status qmi.SIMStatus, details *qmi.CardStatusDetails, slo
 		out.Reason = UIMReadinessCardAbsent
 		return out
 	}
-	if status == qmi.SIMBlocked || status == qmi.SIMPUKRequired || status == qmi.SIMNetworkLocked {
+	if status == qmi.SIMBlocked || status == qmi.SIMPINRequired || status == qmi.SIMPUKRequired || status == qmi.SIMNetworkLocked {
 		out.Reason = UIMReadinessSIMBlocked
 		return out
 	}
@@ -147,36 +161,44 @@ func (m *Manager) GetUIMReadiness(ctx context.Context) (UIMReadiness, error) {
 		return buildUIMReadiness(qmi.SIMNotReady, nil, nil, DeviceIdentities{}, err), err
 	}
 
-	m.mu.RLock()
-	uim := m.uim
-	m.mu.RUnlock()
-
+	type cardStatusResult struct {
+		details *qmi.CardStatusDetails
+		status  qmi.SIMStatus
+	}
 	var details *qmi.CardStatusDetails
 	status := qmi.SIMNotReady
-	var firstErr error
-	if uim == nil {
-		firstErr = ErrServiceNotReady("UIM")
-	} else {
-		details, status, firstErr = uim.GetCardStatusDetails(ctx)
+	cardStatus, cardErr := withUIMRecoveryValue(m, "GetUIMReadiness.GetCardStatusDetails", func(uim *qmi.UIMService) (cardStatusResult, error) {
+		details, status, err := uim.GetCardStatusDetails(ctx)
+		return cardStatusResult{details: details, status: status}, err
+	})
+	if cardErr == nil {
+		details = cardStatus.details
+		status = cardStatus.status
 	}
 
 	var slotInfo *qmi.UIMSlotStatus
-	if firstErr == nil && uim != nil {
-		slotInfo, firstErr = uim.GetSlotStatus(ctx)
+	var slotErr error
+	if cardErr == nil {
+		slotInfo, slotErr = withUIMRecoveryValue(m, "GetUIMReadiness.GetSlotStatus", func(uim *qmi.UIMService) (*qmi.UIMSlotStatus, error) {
+			return uim.GetSlotStatus(ctx)
+		})
 	}
 
 	ids, _ := m.GetCachedIdentities()
-	if strings.TrimSpace(ids.ICCID) == "" {
+	if cardErr == nil && strings.TrimSpace(ids.ICCID) == "" {
 		if iccid, err := m.GetICCID(ctx); err == nil {
 			ids.ICCID = iccid
 		}
 	}
-	if strings.TrimSpace(ids.IMSI) == "" {
+	if cardErr == nil && strings.TrimSpace(ids.IMSI) == "" {
 		if imsi, err := m.GetIMSI(ctx); err == nil {
 			ids.IMSI = imsi
 		}
 	}
 
-	readiness := buildUIMReadiness(status, details, slotInfo, ids, firstErr)
-	return readiness, firstErr
+	readiness := buildUIMReadinessWithSlotError(status, details, slotInfo, ids, cardErr, slotErr)
+	if cardErr != nil {
+		return readiness, cardErr
+	}
+	return readiness, slotErr
 }

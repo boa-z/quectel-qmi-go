@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -40,6 +41,17 @@ func TestBuildUIMReadinessBlockedIsNotTransportFatal(t *testing.T) {
 	}
 }
 
+func TestBuildUIMReadinessPINRequiredIsActionableNotResetting(t *testing.T) {
+	got := buildUIMReadiness(qmi.SIMPINRequired, &qmi.CardStatusDetails{CardState: 0x01}, nil, DeviceIdentities{}, nil)
+
+	if got.Reason != UIMReadinessSIMBlocked {
+		t.Fatalf("reason=%q want %q", got.Reason, UIMReadinessSIMBlocked)
+	}
+	if !got.TransportReady || !got.ControlReady {
+		t.Fatalf("pin required should keep transport/control ready: %+v", got)
+	}
+}
+
 func TestBuildUIMReadinessTransportFatalFromDeviceOpenError(t *testing.T) {
 	err := errors.New("failed to open qmi device /dev/cdc-wdm1: no such device")
 	got := buildUIMReadiness(qmi.SIMNotReady, nil, nil, DeviceIdentities{}, err)
@@ -64,6 +76,32 @@ func TestBuildUIMReadinessControlUnavailableForTimeout(t *testing.T) {
 	}
 }
 
+func TestBuildUIMReadinessIgnoresNonFatalSlotStatusErrorWhenIdentityReady(t *testing.T) {
+	ids := DeviceIdentities{ICCID: "8985203103011907194", IMSI: "460011234567890"}
+
+	got := buildUIMReadinessWithSlotError(qmi.SIMReady, &qmi.CardStatusDetails{CardState: 0x01}, nil, ids, nil, errors.New("QMI error: service=0x0b msg=0x0047 result=0x0001 error=0x0034"))
+
+	if got.Reason != UIMReadinessReady {
+		t.Fatalf("reason=%q want %q", got.Reason, UIMReadinessReady)
+	}
+	if got.SlotKnown {
+		t.Fatalf("SlotKnown=true, want false when slot status failed nonfatally: %+v", got)
+	}
+}
+
+func TestBuildUIMReadinessPromotesFatalSlotStatusError(t *testing.T) {
+	ids := DeviceIdentities{ICCID: "8985203103011907194", IMSI: "460011234567890"}
+
+	got := buildUIMReadinessWithSlotError(qmi.SIMReady, &qmi.CardStatusDetails{CardState: 0x01}, nil, ids, nil, errors.New("failed to open qmi device /dev/cdc-wdm1: no such device"))
+
+	if got.Reason != UIMReadinessTransportFatal {
+		t.Fatalf("reason=%q want %q", got.Reason, UIMReadinessTransportFatal)
+	}
+	if got.TransportReady || got.ControlReady {
+		t.Fatalf("fatal slot error should mark transport/control not ready: %+v", got)
+	}
+}
+
 func TestResolveActiveUIMSlotPrefersActivePresentSlot(t *testing.T) {
 	info := &qmi.UIMSlotStatus{Slots: []qmi.UIMSlotStatusSlot{
 		{PhysicalCardStatus: qmi.UIMPhysicalCardStateAbsent, PhysicalSlotStatus: qmi.UIMSlotStateInactive, LogicalSlot: 1},
@@ -74,5 +112,27 @@ func TestResolveActiveUIMSlotPrefersActivePresentSlot(t *testing.T) {
 
 	if !ok || slot != 2 || source != "uim_slot_status" {
 		t.Fatalf("slot=%d ok=%v source=%q, want slot 2 from uim_slot_status", slot, ok, source)
+	}
+}
+
+func TestGetUIMReadinessUsesUIMRecoveryWrapperForCardStatus(t *testing.T) {
+	wantErr := errors.New("lazy allocation failed")
+	var calls int
+	m := &Manager{}
+	m.ensureUIMServiceHook = func() (*qmi.UIMService, error) {
+		calls++
+		return nil, wantErr
+	}
+
+	got, err := m.GetUIMReadiness(context.Background())
+
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("err=%v want %v", err, wantErr)
+	}
+	if calls != 1 {
+		t.Fatalf("ensure UIM calls=%d, want 1", calls)
+	}
+	if got.Reason != UIMReadinessControlUnavailable {
+		t.Fatalf("reason=%q want %q", got.Reason, UIMReadinessControlUnavailable)
 	}
 }
