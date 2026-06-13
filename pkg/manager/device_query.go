@@ -283,19 +283,13 @@ func (m *Manager) GetIMSIStrictLive(ctx context.Context) (string, error) {
 	lastErr = err
 
 	// 降级尝试 UIM 透明获取
-	m.mu.RLock()
-	uim := m.uim
-	m.mu.RUnlock()
-
-	if uim != nil {
-		imsi, err := uim.GetIMSI(ctx)
-		if err == nil && imsi != "" {
-			return imsi, nil
-		}
-		return "", fmt.Errorf("DMS & UIM 双通道均无法获取 IMSI (UIM error: %v, DMS lastError: %v)", err, lastErr)
+	imsi, err = withUIMRecoveryValue(m, "GetIMSI.UIM", func(uim *qmi.UIMService) (string, error) {
+		return uim.GetIMSI(ctx)
+	})
+	if err == nil && imsi != "" {
+		return imsi, nil
 	}
-
-	return "", fmt.Errorf("无法获取 IMSI (DMS 通道失败: %v, 且 UIM 服务未就绪)", lastErr)
+	return "", fmt.Errorf("DMS & UIM 双通道均无法获取 IMSI (UIM error: %v, DMS lastError: %v)", err, lastErr)
 }
 
 // GetICCID 获取 SIM 卡 ICCID

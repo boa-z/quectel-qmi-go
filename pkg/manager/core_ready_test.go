@@ -199,6 +199,26 @@ func TestStrictLiveIdentityBypassesSnapshot(t *testing.T) {
 	}
 }
 
+func TestGetIMSIStrictLiveUsesUIMRecoveryFallback(t *testing.T) {
+	wantErr := errors.New("uim fallback invoked")
+	var ensureCalls int
+	m := &Manager{}
+	m.getIMSIStrictHook = nil
+	m.ensureUIMServiceHook = func() (*qmi.UIMService, error) {
+		ensureCalls++
+		return nil, wantErr
+	}
+
+	_, err := m.GetIMSIStrictLive(context.Background())
+
+	if ensureCalls != 1 {
+		t.Fatalf("ensure UIM calls=%d want 1", ensureCalls)
+	}
+	if err == nil || !strings.Contains(err.Error(), wantErr.Error()) {
+		t.Fatalf("err=%v, want UIM fallback error %q", err, wantErr)
+	}
+}
+
 func TestSnapshotIdentityGetterReturnsCopyForPointerFields(t *testing.T) {
 	m := newRecoveryTestManager()
 	mode := qmi.ModeOnline
