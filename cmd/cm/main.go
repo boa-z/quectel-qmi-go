@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -26,6 +27,7 @@ var (
 	// Interface selection / 接口选择
 	ifaceName = flag.String("i", "", "Network interface name (e.g., wwan0) / 网络接口名称")
 	devPath   = flag.String("d", "", "Control device path (e.g., /dev/cdc-wdm0) / 控制设备路径")
+	atPath    = flag.String("at", "", "AT port path for vendor-specific data modes (e.g., /dev/ttyUSB2) / 厂商专有拨号使用的 AT 口")
 
 	// IP version / IP版本
 	ipv4Only = flag.Bool("4", false, "IPv4 only / 仅IPv4")
@@ -42,6 +44,7 @@ var (
 	// 多路拨号 (QMAP)
 	profileIndex = flag.Int("n", 0, "PDN Profile index for data call (default 0 = modem default) / 拨号使用的 PDN Profile 索引")
 	muxID        = flag.Int("m", 0, "QMAP Mux ID, bind data call to qmimux<N> (0 = disabled) / QMAP Mux ID，将拨号绑定到虚拟网卡")
+	dataMode     = flag.String("data-mode", "auto", "Data call mode: auto, qmi, simcom-ndis / 数据拨号模式")
 )
 
 const Version = "1.0.0"
@@ -89,30 +92,51 @@ func main() {
 
 	log.Infof("Quectel-CM Go Edition v%s", Version)
 
-	// Discover modems / 发现modem设备
-	log.Info("Discovering modems...")
-	modems, err := device.Discover()
+	mode, err := parseDataCallMode(*dataMode)
 	if err != nil {
-		log.Fatal("Failed to discover modems: ", err)
+		log.Fatal(err)
 	}
 
 	// Select modem / 选择modem
 	var selectedModem manager.ModemDevice
+	log.Info("Discovering modems...")
+	modems, discoverErr := device.Discover()
 	if *ifaceName != "" || *devPath != "" {
 		// Match by specified interface or device / 根据指定的接口或设备匹配
-		for _, m := range modems {
-			if (*ifaceName != "" && m.NetInterface == *ifaceName) ||
-				(*devPath != "" && m.ControlPath == *devPath) {
-				selectedModem = m
-				break
+		if discoverErr == nil {
+			for _, m := range modems {
+				if (*ifaceName != "" && m.NetInterface == *ifaceName) ||
+					(*devPath != "" && m.ControlPath == *devPath) {
+					selectedModem = m
+					break
+				}
 			}
 		}
 		if selectedModem.ControlPath == "" {
-			log.Fatal("Specified modem not found")
+			if *ifaceName == "" || *devPath == "" {
+				if discoverErr != nil {
+					log.Fatalf("Failed to discover modems and explicit -d/-i are incomplete: %v", discoverErr)
+				}
+				log.Fatal("Specified modem not found; provide both -d and -i to bypass discovery")
+			}
+			selectedModem = manager.ModemDevice{
+				ControlPath:  *devPath,
+				NetInterface: *ifaceName,
+			}
+			if mode == manager.DataCallModeSIMCOMNDIS {
+				selectedModem.VendorID = manager.VendorSIMCOM
+				selectedModem.ProductID = 0x9001
+			}
 		}
 	} else {
+		if discoverErr != nil {
+			log.Fatal("Failed to discover modems: ", discoverErr)
+		}
 		// Use first modem / 使用第一个发现的modem
 		selectedModem = modems[0]
+	}
+	if strings.TrimSpace(*atPath) != "" {
+		selectedModem.ATPort = strings.TrimSpace(*atPath)
 	}
 
 	log.Infof("Using modem: %s", selectedModem)
@@ -140,6 +164,8 @@ func main() {
 		NoDNS:         !*setDNS,
 		ProfileIndex:  uint8(*profileIndex),
 		MuxID:         uint8(*muxID),
+		ATPort:        *atPath,
+		DataCallMode:  mode,
 	}
 
 	// Create and start manager / 创建并启动管理器
@@ -178,5 +204,18 @@ func main() {
 				log.Infof("Status: %s", state)
 			}
 		}
+	}
+}
+
+func parseDataCallMode(s string) (manager.DataCallMode, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "auto":
+		return manager.DataCallModeAuto, nil
+	case string(manager.DataCallModeQMI):
+		return manager.DataCallModeQMI, nil
+	case string(manager.DataCallModeSIMCOMNDIS):
+		return manager.DataCallModeSIMCOMNDIS, nil
+	default:
+		return "", fmt.Errorf("invalid -data-mode %q (expected auto, qmi, simcom-ndis)", s)
 	}
 }

@@ -2,6 +2,20 @@ package manager
 
 import "fmt"
 
+const (
+	VendorQuectel  uint16 = 0x2c7c
+	VendorQualcomm uint16 = 0x05c6
+	VendorSIMCOM   uint16 = 0x1e0e
+)
+
+type DataCallMode string
+
+const (
+	DataCallModeAuto       DataCallMode = ""
+	DataCallModeQMI        DataCallMode = "qmi"
+	DataCallModeSIMCOMNDIS DataCallMode = "simcom-ndis"
+)
+
 // ModemDevice 表示由发现流程或调用方注入的 modem 设备信息。
 // 该结构是库内唯一的设备描述类型，pkg/device 只负责返回它，不再重复定义。
 type ModemDevice struct {
@@ -20,6 +34,10 @@ type ModemDevice struct {
 
 	AudioDevice  string
 	AudioCardNum int
+}
+
+func (m ModemDevice) IsSIMCOM() bool {
+	return m.VendorID == VendorSIMCOM
 }
 
 func (m ModemDevice) String() string {

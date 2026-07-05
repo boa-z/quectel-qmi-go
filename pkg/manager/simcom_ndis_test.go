@@ -1,0 +1,142 @@
+package manager
+
+import (
+	"context"
+	"net"
+	"reflect"
+	"testing"
+	"time"
+
+	"github.com/iniwex5/quectel-qmi-go/pkg/netcfg"
+)
+
+type fakeSIMCOMConfigurator struct {
+	ip         net.IP
+	up         bool
+	rawIP      bool
+	flushed    bool
+	routeFlush bool
+}
+
+func (f *fakeSIMCOMConfigurator) SetIPAddress(string, net.IP, int) error   { return nil }
+func (f *fakeSIMCOMConfigurator) SetIPv6Address(string, net.IP, int) error { return nil }
+func (f *fakeSIMCOMConfigurator) FlushAddresses(string) error {
+	f.flushed = true
+	f.ip = nil
+	return nil
+}
+func (f *fakeSIMCOMConfigurator) AddDefaultRoute(string, net.IP) error     { return nil }
+func (f *fakeSIMCOMConfigurator) AddDefaultRouteDirect(string, bool) error { return nil }
+func (f *fakeSIMCOMConfigurator) FlushRoutes(string) error {
+	f.routeFlush = true
+	return nil
+}
+func (f *fakeSIMCOMConfigurator) BringUp(string) error {
+	f.up = true
+	return nil
+}
+func (f *fakeSIMCOMConfigurator) BringDown(string) error {
+	f.up = false
+	return nil
+}
+func (f *fakeSIMCOMConfigurator) SetMTU(string, int) error                 { return nil }
+func (f *fakeSIMCOMConfigurator) GetCurrentIP(string) (net.IP, error)      { return f.ip, nil }
+func (f *fakeSIMCOMConfigurator) IsUp(string) (bool, error)                { return f.up, nil }
+func (f *fakeSIMCOMConfigurator) UpdateDNS(string, string) error           { return nil }
+func (f *fakeSIMCOMConfigurator) RestoreDNS() error                        { return nil }
+func (f *fakeSIMCOMConfigurator) AddQMAPMux(string, uint8) (string, error) { return "", nil }
+func (f *fakeSIMCOMConfigurator) DelQMAPMux(string, uint8) error           { return nil }
+func (f *fakeSIMCOMConfigurator) GetQMAPMuxIface(string, uint8) string     { return "" }
+func (f *fakeSIMCOMConfigurator) EnableRawIP(string) error {
+	f.rawIP = true
+	return nil
+}
+
+func TestEffectiveDataCallModeDefaultsSIMCOMToNDIS(t *testing.T) {
+	m := New(Config{Device: ModemDevice{VendorID: VendorSIMCOM}}, nil)
+	if got := m.effectiveDataCallMode(); got != DataCallModeSIMCOMNDIS {
+		t.Fatalf("effectiveDataCallMode()=%q want %q", got, DataCallModeSIMCOMNDIS)
+	}
+}
+
+func TestEffectiveDataCallModeAllowsQMIOverride(t *testing.T) {
+	m := New(Config{
+		Device:       ModemDevice{VendorID: VendorSIMCOM},
+		DataCallMode: DataCallModeQMI,
+	}, nil)
+	if got := m.effectiveDataCallMode(); got != DataCallModeQMI {
+		t.Fatalf("effectiveDataCallMode()=%q want %q", got, DataCallModeQMI)
+	}
+}
+
+func TestSIMCOMNDISConnectRunsATDialAndDHCP(t *testing.T) {
+	fakeNet := &fakeSIMCOMConfigurator{}
+	netcfg.SetConfigurator(fakeNet)
+	t.Cleanup(func() { netcfg.SetConfigurator(nil) })
+
+	var commands []string
+	m := New(Config{
+		Device: ModemDevice{
+			VendorID:     VendorSIMCOM,
+			ProductID:    0x9001,
+			NetInterface: "wwan0",
+			ATPort:       "/dev/ttyUSB2",
+		},
+		APN:        "cmnet",
+		EnableIPv4: true,
+		EnableIPv6: true,
+	}, nil)
+	m.simcomATCommand = func(ctx context.Context, port string, command string, timeout time.Duration) (string, error) {
+		if port != "/dev/ttyUSB2" {
+			t.Fatalf("AT port=%q want /dev/ttyUSB2", port)
+		}
+		commands = append(commands, command)
+		return "\r\nOK\r\n", nil
+	}
+	m.simcomDHCP = func(ctx context.Context, ifname string) error {
+		if ifname != "wwan0" {
+			t.Fatalf("DHCP ifname=%q want wwan0", ifname)
+		}
+		fakeNet.ip = net.IPv4(10, 64, 1, 2)
+		return nil
+	}
+	m.desiredConnection = true
+
+	if err := m.doConnect(); err != nil {
+		t.Fatalf("doConnect() error = %v", err)
+	}
+	wantCommands := []string{`AT+CGDCONT=1,"IP","cmnet"`, "AT$QCRMCALL=1,1"}
+	if !reflect.DeepEqual(commands, wantCommands) {
+		t.Fatalf("commands=%v want %v", commands, wantCommands)
+	}
+	if !fakeNet.rawIP || !fakeNet.flushed || !fakeNet.routeFlush || !fakeNet.up {
+		t.Fatalf("network prep rawIP=%v flushed=%v routeFlush=%v up=%v", fakeNet.rawIP, fakeNet.flushed, fakeNet.routeFlush, fakeNet.up)
+	}
+	if got := m.State(); got != StateConnected {
+		t.Fatalf("State()=%v want %v", got, StateConnected)
+	}
+	settings := m.Settings()
+	if settings == nil || !settings.IPv4Address.Equal(net.IPv4(10, 64, 1, 2)) {
+		t.Fatalf("settings IPv4=%v want 10.64.1.2", settings)
+	}
+}
+
+func TestSIMCOMNDISConnectRequiresATPort(t *testing.T) {
+	fakeNet := &fakeSIMCOMConfigurator{}
+	netcfg.SetConfigurator(fakeNet)
+	t.Cleanup(func() { netcfg.SetConfigurator(nil) })
+
+	m := New(Config{
+		Device: ModemDevice{
+			VendorID:     VendorSIMCOM,
+			NetInterface: "wwan0",
+		},
+		APN:        "cmnet",
+		EnableIPv4: true,
+	}, nil)
+	m.desiredConnection = true
+
+	if err := m.doConnect(); err == nil {
+		t.Fatal("doConnect() error = nil, want missing AT port error")
+	}
+}

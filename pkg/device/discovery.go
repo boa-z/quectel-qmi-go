@@ -99,8 +99,8 @@ func discoverFromSysFS(usbPath string) (*manager.ModemDevice, error) {
 	pid := readHexFile(filepath.Join(scanUSBPath, "idProduct"))
 	// fmt.Printf("Device %s: VID=%04x PID=%04x\n", usbPath, vid, pid)
 
-	if vid != 0x2c7c && vid != 0x05c6 { // Quectel & Qualcomm
-		return nil, fmt.Errorf("不是 Quectel 设备")
+	if vid != manager.VendorQuectel && vid != manager.VendorQualcomm && vid != manager.VendorSIMCOM {
+		return nil, fmt.Errorf("不是支持的 QMI 模组")
 	}
 
 	// device.c 逻辑: 查找网络接口
@@ -153,7 +153,7 @@ func discoverFromSysFS(usbPath string) (*manager.ModemDevice, error) {
 	}
 	// device.c 针对 ECM/RNDIS/NCM 的逻辑 (但也适用于 QMI 的 AT 命令)
 	atIntf := -1
-	if vid == 0x2c7c {
+	if vid == manager.VendorQuectel {
 		switch pid {
 		case 0x0901, 0x0902, 0x8101: // EC200U, EC200D, RG801H
 			atIntf = 2
@@ -168,8 +168,11 @@ func discoverFromSysFS(usbPath string) (*manager.ModemDevice, error) {
 			// 对于 EC20 (pid 0x0125) 和其他型号，典型默认值为 2
 			atIntf = 2
 		}
-	} else if vid == 0x05c6 {
+	} else if vid == manager.VendorQualcomm {
 		// 高通默认值
+		atIntf = 2
+	} else if vid == manager.VendorSIMCOM {
+		// SIM7500/SIM7600 默认 1e0e:9001: interface 2 is AT, interface 5 is RMNet/wwan.
 		atIntf = 2
 	}
 

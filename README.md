@@ -127,6 +127,8 @@ sudo ./quectel-qmi-go -s ims -n 2 -m 2
 | `-set-dns` | 写 DNS，默认关闭 |
 | `-n` | PDN Profile 索引 |
 | `-m` | `QMAP Mux ID` |
+| `-data-mode` | 数据拨号模式：`auto`、`qmi`、`simcom-ndis` |
+| `-at` | 厂商专有拨号使用的 AT 口，例如 SIMCOM 的 `/dev/ttyUSB2` |
 | `-v` | 输出调试日志 |
 | `-version` | 输出版本 |
 
@@ -135,6 +137,21 @@ sudo ./quectel-qmi-go -s ims -n 2 -m 2
 - 如果 `-4` 和 `-6` 都不传，默认启用双栈
 - `-set-route` 和 `-set-dns` 默认关闭，更适合调试和集成到自定义网络编排里
 - `-n` 和 `-m` 一般配合多 PDN / QMAP 使用
+
+### SIMCOM / SIM7600 适配
+
+当前发现流程支持 SIMCOM `1e0e:9001` 这类 USB 组合设备，并按 SIM7500/SIM7600 默认接口布局选择：
+
+- Interface 2: AT port
+- Interface 5: RMNet / `wwan` interface
+
+`-data-mode auto` 在识别到 SIMCOM 设备时会默认使用 `simcom-ndis` 数据面。该模式仍使用 QMI 控制面做设备、网络、短信等查询，但数据拨号按 SIMCOM 官方 NDIS 流程执行：
+
+```bash
+sudo ./quectel-qmi-go -s CMNET -data-mode simcom-ndis -d /dev/cdc-wdm0 -i wwan0 -at /dev/ttyUSB2
+```
+
+该模式会设置 `AT+CGDCONT=1,"IP","<APN>"`，再执行 `AT$QCRMCALL=1,1`，随后通过 `udhcpc` 或 `dhclient` 为网卡获取地址；断开时执行 `AT$QCRMCALL=0,1`。`simcom-ndis` 目前只面向 IPv4 DHCP，不支持 QMAP Mux；如果要强制尝试标准 QMI WDS 拨号，可以传 `-data-mode qmi`。
 
 ## 作为库使用
 

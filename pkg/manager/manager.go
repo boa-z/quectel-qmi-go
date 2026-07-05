@@ -81,6 +81,8 @@ type Config struct {
 	ProfileIndex uint8 // PDN Profile 索引 (对应 -n 参数, 默认 0 表示使用模组默认 Profile)
 	MuxID        uint8 // QMAP Mux ID (对应 -m 参数, 默认 0 表示不启用多路复用)
 	NoDial       bool  // Only open QMI services, don't perform WDS dialing / 仅打开 QMI 服务, 不进行 WDS 拨号
+	ATPort       string
+	DataCallMode DataCallMode
 
 	DataPlanePolicy DataPlanePolicy // Data-plane service allocation policy / 数据面服务分配策略
 	Timeouts        TimeoutConfig
@@ -187,10 +189,10 @@ type Manager struct {
 	events  *EventEmitter // External event callbacks / 外部事件回调
 
 	// Reconnection / 重连相关
-	retryCount   int
-	retryDelays  []time.Duration
-	reinitDelays []time.Duration
-	isRotating   bool // Flag to suppress status checks during IP rotation / 标志位: IP轮换期间抑制状态检查
+	retryCount         int
+	retryDelays        []time.Duration
+	reinitDelays       []time.Duration
+	isRotating         bool // Flag to suppress status checks during IP rotation / 标志位: IP轮换期间抑制状态检查
 	recoverCount       int
 	recoverFirstFailAt time.Time // 本轮连续恢复失败的首次时间，用于 MaxRecoverElapsed 判据
 	lastIPCheck        time.Time
@@ -256,6 +258,8 @@ type Manager struct {
 	queryExistingPacketServiceState   func(ctx context.Context, wds *qmi.WDSService) (qmi.ConnectionStatus, error)
 	stopExistingDataCall              func(ctx context.Context, wds *qmi.WDSService) error
 	closeWDSService                   func(wds *qmi.WDSService) error
+	simcomATCommand                   func(ctx context.Context, port string, command string, timeout time.Duration) (string, error)
+	simcomDHCP                        func(ctx context.Context, ifname string) error
 	registerWMSEventReport            func(ctx context.Context) error
 	registerWMSIndications            func(ctx context.Context, reportTransportNetworkRegistration bool) error
 	registerNASIndications            func(ctx context.Context, cfg qmi.NASIndicationRegistration) error
@@ -1184,6 +1188,9 @@ func (m *Manager) shouldAllocateWDA() bool {
 }
 
 func (m *Manager) shouldAllocateDataPlaneAtStart() bool {
+	if m.useSIMCOMNDIS() {
+		return false
+	}
 	return m.cfg.DataPlanePolicy == DataPlanePolicyEager
 }
 
@@ -2307,7 +2314,7 @@ func (m *Manager) setState(s State) {
 }
 
 type startupServiceTask struct {
-	run  func(context.Context) error
+	run func(context.Context) error
 }
 
 func (m *Manager) runStartupServiceTasks(ctx context.Context, fatal bool, tasks []startupServiceTask) error {
@@ -3355,6 +3362,10 @@ func (m *Manager) doConnect() error {
 	dialCtx, cancelDial := m.opContext(m.cfg.Timeouts.Dial)
 	defer cancelDial()
 
+	if m.useSIMCOMNDIS() {
+		return m.doSIMCOMNDISConnect(dialCtx)
+	}
+
 	if err := m.ensureDataPlaneServices(dialCtx); err != nil {
 		m.handleDialFailure(err)
 		return err
@@ -3648,6 +3659,13 @@ func (m *Manager) doDisconnect() {
 	ctx, cancel := m.opContext(m.cfg.Timeouts.Stop)
 	defer cancel()
 
+	if m.useSIMCOMNDIS() {
+		m.doSIMCOMNDISDisconnect(ctx)
+		m.setState(StateDisconnected)
+		m.emitEvent(Event{Type: EventDisconnected, State: StateDisconnected})
+		return
+	}
+
 	if m.handleV4 != 0 && m.wds != nil {
 		_ = m.wds.StopNetworkInterface(ctx, m.handleV4)
 		m.handleV4 = 0
@@ -3711,6 +3729,11 @@ func (m *Manager) doStatusCheck(full bool) {
 				m.log.Infof("Network: %s (MCC:%d MNC:%d) Tech:%d", ss.RegistrationState, ss.MCC, ss.MNC, ss.RadioInterface)
 			}
 		}
+	}
+
+	if m.useSIMCOMNDIS() {
+		m.doSIMCOMNDISStatusCheck(currentState, desiredConnection)
+		return
 	}
 
 	// 2. Query connection status / 2. 查询连接状态
@@ -3911,7 +3934,7 @@ func (m *Manager) handleIndication(evt qmi.Event) {
 					}
 					current, _ := m.snapshot.ServingSystem()
 					previousServing = current
-					
+
 					isChanged := false
 					if current != nil {
 						if hasServingTLV {
