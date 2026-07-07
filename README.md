@@ -164,9 +164,9 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/iniwex5/quectel-qmi-go/pkg/device"
-	"github.com/iniwex5/quectel-qmi-go/pkg/manager"
-	"github.com/iniwex5/quectel-qmi-go/pkg/qmi"
+	"github.com/boa-z/quectel-qmi-go/pkg/device"
+	"github.com/boa-z/quectel-qmi-go/pkg/manager"
+	"github.com/boa-z/quectel-qmi-go/pkg/qmi"
 )
 
 func main() {

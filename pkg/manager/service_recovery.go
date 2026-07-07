@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/iniwex5/quectel-qmi-go/pkg/qmi"
+	"github.com/boa-z/quectel-qmi-go/pkg/qmi"
 )
 
 type serviceTimeoutKey struct {
@@ -155,7 +155,7 @@ func (m *Manager) detectTimeoutStorm(service string) {
 	if m.globalTimeoutServices == nil {
 		m.globalTimeoutServices = make(map[string]time.Time)
 	}
-	
+
 	for svc, t := range m.globalTimeoutServices {
 		if now.Sub(t) > stormWindow {
 			delete(m.globalTimeoutServices, svc)

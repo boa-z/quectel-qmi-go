@@ -4,7 +4,7 @@ import (
 	"context"
 	"strings"
 
-	"github.com/iniwex5/quectel-qmi-go/pkg/qmi"
+	"github.com/boa-z/quectel-qmi-go/pkg/qmi"
 )
 
 type UIMReadinessReason string
@@ -21,21 +21,21 @@ const (
 )
 
 type UIMReadiness struct {
-	TransportReady bool
-	ControlReady   bool
-	UIMReady       bool
-	CardPresent    bool
-	SIMStatus      qmi.SIMStatus
-	ActiveSlot     uint8
-	SlotKnown      bool
-	SlotSource     string
+	TransportReady     bool
+	ControlReady       bool
+	UIMReady           bool
+	CardPresent        bool
+	SIMStatus          qmi.SIMStatus
+	ActiveSlot         uint8
+	SlotKnown          bool
+	SlotSource         string
 	ICCID              string
 	IMSI               string
 	AppState           uint8
 	ProvisioningActive bool
 	NeedsProvisioning  bool
 	Reason             UIMReadinessReason
-	Err            error
+	Err                error
 }
 
 func isUIMReadinessTransportFatal(err error) bool {
